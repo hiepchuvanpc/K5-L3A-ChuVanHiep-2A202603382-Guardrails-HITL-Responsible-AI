@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -51,14 +52,27 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    # Canonicalize Unicode (NFKC) and strip zero-width / invisible formatting characters
+    normalized = unicodedata.normalize("NFKC", user_input or "")
+    normalized = re.sub(r"[\u200b-\u200f\ufeff\u00ad\u2060-\u206f]", "", normalized)
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"ignore\s+(?:all\s+)?(?:previous|above|prior)\s+instructions?",
+        r"disregard\s+(?:all\s+)?(?:previous|above|prior)\s*(?:instructions?|rules?)",
+        r"you\s+are\s+now\b",
+        r"system\s+prompt",
+        r"reveal\s+your\s+(?:instructions?|prompt|system\s+prompt|secrets?)",
+        r"reveal\s+(?:the\s+)?(?:internal\s+)?(?:password|credentials|api\s*key)",
+        r"pretend\s+(?:you\s+are|to\s+be)",
+        r"act\s+as\s+(?:a\s+|an\s+)?(?:unrestricted|jailbroken|evil|DAN)",
+        r"role\s*play\s+as",
+        r"bỏ\s+qua\s+(?:mọi\s+)?hướng\s+dẫn",
+        r"quên\s+(?:mọi\s+)?hướng\s+dẫn",
+        r"tiết\s+lộ\s+(?:mật\s*khẩu|api|system\s*prompt)",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized, re.IGNORECASE):
             return "BLOCK"
     return "ALLOW"
 
@@ -84,14 +98,27 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    input_lower = (user_input or "").lower()
 
-    # TODO: Implement logic:
     # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    for b in BLOCKED_TOPICS:
+        if b in input_lower:
+            return "BLOCK"
 
-    pass  # Replace with your implementation
+    # 2. Check if input contains any allowed topic
+    has_allowed = any(a in input_lower for a in ALLOWED_TOPICS)
+    if not has_allowed:
+        # Also check with Vietnamese accent normalization
+        normalized_vn = unicodedata.normalize("NFD", input_lower)
+        unaccented = "".join(c for c in normalized_vn if unicodedata.category(c) != "Mn").replace("đ", "d")
+        if any(a in unaccented for a in ALLOWED_TOPICS):
+            has_allowed = True
+
+    if not has_allowed:
+        return "BLOCK"
+
+    # 3. Otherwise -> return "ALLOW"
+    return "ALLOW"
 
 
 # ============================================================
@@ -132,7 +159,7 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
     async def on_user_message_callback(
         self,
         *,
-        invocation_context: InvocationContext,
+        invocation_context: InvocationContext | None = None,
         user_message: types.Content,
     ) -> types.Content | None:
         """Check user message before sending to the agent.
@@ -144,14 +171,19 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I cannot process that request. I only help with VinBank banking questions."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I'm a VinBank assistant and can only help with banking-related questions."
+            )
+
+        return None
 
 
 # ============================================================
